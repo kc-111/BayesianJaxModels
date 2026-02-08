@@ -148,6 +148,182 @@ def vi_step(dynamic, opt_state, key):
     return optax.apply_updates(dynamic, updates), opt_state_, loss
 ```
 
+Full example:
+```python
+import optax
+import jax
+import jax.numpy as jnp
+import equinox as eqx
+from tqdm import tqdm
+from BayesianJaxModels import (
+    freeze_stdvs,
+    freeze_means,
+    sample_all_parameters,
+    gaussian_entropy,
+    laplacian_entropy,
+)
+
+
+def train_map(
+    model, X, Y, *,
+    key, num_epochs, batch_size,
+    learning_rate, prior_weight,
+):
+    """
+    Train the model using the Maximum a posteriori (MAP) estimation.
+    Objective: -log p(y|x, z) + λ * -log p(z)
+    we assume -log p(y|x, z) is mean squared error
+    and -log p(z) is ||z||_2^2.
+
+    Args:
+        model: The model to train.
+        X: The input data (samples, features).
+        Y: The output data (samples, targets).
+        key: The random key.
+        num_epochs: The number of epochs to train for.
+        batch_size: The batch size.
+        learning_rate: The learning rate for the optimizer.
+        prior_weight: The weight of the prior.
+
+    Returns:
+        The trained model.
+    """
+    # Freeze variational parameters — only optimize means
+    dynamic, static = freeze_stdvs(model)
+
+    # Define optimizer adabelief with no weight decay
+    optimizer = optax.adabelief(learning_rate)
+    opt_state = optimizer.init(dynamic)
+
+    # Define jitted loss function for map
+    @eqx.filter_jit
+    def step(dynamic, static, opt_state, X_batch, Y_batch):
+        def loss_fn(dynamic):
+            model = eqx.combine(dynamic, static)
+            pred = model(X_batch, key=jax.random.key(0), sample=False)
+            mse = jnp.mean((pred - Y_batch) ** 2)
+            l2 = model.compute_prior()
+            return mse + prior_weight * l2
+
+        loss, grads = eqx.filter_value_and_grad(loss_fn)(dynamic)
+        updates, opt_state = optimizer.update(grads, opt_state, dynamic)
+        dynamic = eqx.apply_updates(dynamic, updates)
+        return dynamic, opt_state, loss
+
+    # Run training loop for num_epochs and minibatches
+    n = X.shape[0]
+    pbar = tqdm(range(num_epochs), desc="MAP")
+    for epoch in pbar:
+        key, subkey = jax.random.split(key)
+        perm = jax.random.permutation(subkey, n)
+        for i in range(n // batch_size):
+            idx = perm[i * batch_size : (i + 1) * batch_size]
+            dynamic, opt_state, loss = step(
+                dynamic, static, opt_state, X[idx], Y[idx]
+            )
+        pbar.set_postfix(loss=f"{float(loss):.4f}")
+
+    # Return the trained model
+    return eqx.combine(dynamic, static)
+
+
+def train_vi(
+    model, X, Y, *,
+    key, num_epochs, batch_size,
+    learning_rate, prior_weight,
+    num_samples=1,
+):
+    """
+    Train the model using the Variational Inference (VI) algorithm.
+    p(z) = 1/Z * exp(-g(z)), so log p(z) = -g(z) - log Z
+    KL(q || p) = -E_q[log q(z)] + E_q[log p(z)] ∝ -H(q) + E_q[-g(z)]
+    Tempered ELBO = E_q[log p(y|x, z)] - λ * KL(q || p)
+    = E_q[log p(y|x, z)] - λ * (-H(q) + E_q[g(z)])
+    = E_q[log p(y|x, z)] + λ * (H(q) - E_q[g(z)])
+    Objective: -E_q[log p(y|x, z)] + λ * (E_q[g(z)] - H(q))
+
+    log p(y|x, z) is mean squared error.
+    g(z) = ||z||_2^2.
+    H(q) is the entropy of the variational distribution.
+
+    Means are frozen (set via MAP); only variational widths are optimized.
+    Both likelihood and prior expectations are estimated via Monte Carlo
+    with independent samples from q.
+
+    Args:
+        model: The model to train (typically MAP-pretrained).
+        X: The input data (samples, features).
+        Y: The output data (samples, targets).
+        key: The random key.
+        num_epochs: The number of epochs to train for.
+        batch_size: The batch size.
+        learning_rate: The learning rate for the optimizer.
+        prior_weight: The weight of the prior.
+        num_samples: Number of MC samples for likelihood and prior
+            expectations (independent draws for each).
+
+    Returns:
+        The trained model.
+    """
+    # Freeze means — only optimize variational widths (raw_stdv / raw_scale)
+    dynamic, static = freeze_means(model)
+
+    # Define optimizer adabelief with no weight decay
+    optimizer = optax.adabelief(learning_rate)
+    opt_state = optimizer.init(dynamic)
+
+    # Define jitted loss function for vi
+    @eqx.filter_jit
+    def step(dynamic, static, opt_state, X_batch, Y_batch, key):
+        def loss_fn(dynamic):
+            model = eqx.combine(dynamic, static)
+            k_lik, k_prior = jax.random.split(key)
+            k_liks = jax.random.split(k_lik, num_samples)
+            k_priors = jax.random.split(k_prior, num_samples)
+
+            # Likelihood: E_q[-log p(y|x,z)] ≈ (1/K) Σ MSE(z_k)
+            def lik_sample(k):
+                sampled = sample_all_parameters(model, k)
+                pred = sampled(X_batch, key=jax.random.key(0), sample=False)
+                return jnp.mean((pred - Y_batch) ** 2)
+
+            mse = jnp.mean(jax.vmap(lik_sample)(k_liks))
+
+            # Prior: E_q[g(z)] ≈ (1/K) Σ g(z_k) on effective params
+            def prior_sample(k):
+                sampled = sample_all_parameters(model, k)
+                return sampled.compute_prior()
+
+            prior = jnp.mean(jax.vmap(prior_sample)(k_priors))
+
+            # Entropy: H(q) (analytical)
+            entropy = gaussian_entropy(model) + laplacian_entropy(model)
+
+            return mse + prior_weight * (prior - entropy)
+
+        loss, grads = eqx.filter_value_and_grad(loss_fn)(dynamic)
+        updates, opt_state = optimizer.update(grads, opt_state, dynamic)
+        dynamic = eqx.apply_updates(dynamic, updates)
+        return dynamic, opt_state, loss
+
+    # Run training loop for num_epochs and minibatches
+    n = X.shape[0]
+    pbar = tqdm(range(num_epochs), desc="VI")
+    for epoch in pbar:
+        key, subkey = jax.random.split(key)
+        perm = jax.random.permutation(subkey, n)
+        for i in range(n // batch_size):
+            idx = perm[i * batch_size : (i + 1) * batch_size]
+            key, subkey = jax.random.split(key)
+            dynamic, opt_state, loss = step(
+                dynamic, static, opt_state, X[idx], Y[idx], subkey
+            )
+        pbar.set_postfix(loss=f"{float(loss):.4f}")
+
+    # Return the trained model
+    return eqx.combine(dynamic, static)
+```
+
 ### ODE integration pattern
 
 For models where parameters must be fixed across time steps (ODEs, RNNs),
