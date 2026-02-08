@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bayesian-jax-models"
+version = "0.1.0"
+description = "Modular Bayesian model framework in JAX, built on Equinox"
+authors = [
+  { name = "Pak Lun Kevin Cheung", email = "pcheung4@wisc.edu" }
+]
+license = "MIT"
+readme = "README.md"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+requires-python = ">=3.11"
+dependencies = [
+    "jax",
+    "equinox>=0.13.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "optax",
+    "diffrax",
+]
+
+[project.urls]
+Homepage = "https://github.com/kc-111/BayesianJaxModels"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/BayesianJaxModels"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
