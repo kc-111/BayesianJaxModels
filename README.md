@@ -19,6 +19,14 @@ With test dependencies:
 pip install "BayesianJaxModels[test] @ git+https://github.com/kc-111/BayesianJaxModels.git"
 ```
 
+To list as a dependency in another project's `pyproject.toml`:
+
+```toml
+dependencies = [
+    "BayesianJaxModels @ git+https://github.com/kc-111/BayesianJaxModels.git",
+]
+```
+
 ## Dependencies
 
 - `jax`
