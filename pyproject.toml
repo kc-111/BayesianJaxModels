@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "bayesian-jax-models"
+name = "BayesianJaxModels"
 version = "0.1.0"
 description = "Modular Bayesian model framework in JAX, built on Equinox"
 authors = [
