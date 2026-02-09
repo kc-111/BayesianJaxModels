@@ -423,6 +423,181 @@ otherwise CPU). Since equinox modules are pytrees of JAX arrays, the entire mode
 automatically lives on the correct device. No code changes are needed to switch between
 CPU, GPU, or TPU.
 
+## Static fields in models
+
+Equinox modules are [JAX pytrees](https://jax.readthedocs.io/en/latest/pytrees.html) — every field is a leaf that JAX can trace, differentiate, and JIT-compile through. Sometimes you need fields that are **not** part of the pytree: configuration values, prior means for transfer learning, labels, or metadata. Mark these with `eqx.field(static=True)`.
+
+### What static means
+
+Static fields are **invisible to JAX** — they are embedded in the compiled computation graph as constants rather than traced as inputs. This means:
+
+| Behavior | Static fields | Normal fields (parameters) |
+|----------|:---:|:---:|
+| Traced / differentiated by JAX | No | Yes |
+| Updated by optimizer | No | Yes |
+| Returned by `get_parameters()` | No | Yes |
+| Affected by `freeze_stdvs` / `freeze_means` | No | Yes |
+| Affected by `sample_all_parameters` | No | Yes |
+| Included in `gaussian_entropy` | No | Yes |
+
+In short: `freeze_stdvs`, `freeze_means`, `sample_all_parameters`, `gaussian_entropy`, `get_parameters`, and the optimizer all skip static fields automatically. No special handling is needed.
+
+### Static fields must be hashable
+
+JAX uses the treedef (which includes static field values) as a cache key for JIT compilation. This means static fields must support **hashing and simple equality** — Python's `==` must return a single `bool`, not an array.
+
+Types that work:
+
+| Type | Works as static? | Notes |
+|------|:---:|-------|
+| `str`, `int`, `float`, `bool` | Yes | Hashable and simple equality |
+| `tuple` (of hashable elements) | Yes | Including nested tuples |
+| `None` | Yes | Common default for optional fields |
+| `numpy.ndarray` | **No** | `==` returns an array, not a bool — causes `ValueError` at JIT time |
+| `jax.Array` | **No** | Same issue; also triggers an equinox warning |
+
+If you store a `numpy.ndarray` or `jax.Array` as static, things will appear to work at first (construction, forward pass, even a single training step), but **will crash** the first time JAX needs to compare treedefs — typically when the optimizer calls `update()`:
+
+```
+ValueError: The truth value of an array with more than one element is ambiguous.
+```
+
+**The fix:** store array data as nested tuples, and reconstruct via a property:
+
+```python
+import numpy as np
+
+def _to_tuple(arr):
+    """Convert an array to a nested tuple (hashable, simple equality)."""
+    a = np.asarray(arr)
+    if a.ndim == 0:
+        return float(a)
+    if a.ndim == 1:
+        return tuple(float(x) for x in a)
+    return tuple(tuple(float(x) for x in row) for row in a)
+
+
+def _from_tuple(t, shape):
+    """Convert a nested tuple back to a jax array."""
+    return jnp.array(t).reshape(shape)
+
+
+class TransferModel(Module):
+    W: AbstractParameter
+    b: AbstractParameter
+    _prior_data: tuple | None = eqx.field(static=True)
+    _prior_shape: tuple | None = eqx.field(static=True)
+
+    def __init__(self, dim, *, key, prior_mean=None):
+        k1, k2 = jax.random.split(key)
+        self.W = make_parameter(jax.random.normal(k1, (dim, dim)) * 0.1)
+        self.b = make_parameter(jax.random.normal(k2, (dim,)) * 0.1)
+        if prior_mean is not None:
+            arr = np.asarray(prior_mean)
+            self._prior_data = _to_tuple(arr)
+            self._prior_shape = arr.shape
+        else:
+            self._prior_data = None
+            self._prior_shape = None
+
+    @property
+    def prior_mean(self):
+        """Reconstruct the prior mean array (or None)."""
+        if self._prior_data is None:
+            return None
+        return _from_tuple(self._prior_data, self._prior_shape)
+
+    def __call__(self, x, *, key, sample=True):
+        if sample:
+            k1, k2 = jax.random.split(key)
+            return x @ self.W.sample(k1) + self.b.sample(k2)
+        return x @ self.W.mean + self.b.mean
+
+    def compute_prior(self):
+        p0 = self.prior_mean if self.prior_mean is not None else 0.0
+        return jnp.sum((self.W.mean - p0) ** 2) + jnp.sum(self.b.mean ** 2)
+```
+
+Strings, ints, and other naturally hashable types can be stored directly:
+
+```python
+class MyModel(Module):
+    layers: list
+    activation: str = eqx.field(static=True)  # "relu", "gelu", etc.
+```
+
+### Common use cases
+
+**Prior means for transfer learning** — store a source posterior as a fixed prior:
+
+```python
+model = TransferModel(5, key=key, prior_mean=source_posterior_W)
+# compute_prior() penalises distance from prior_mean
+# optimizer only updates W and b, never prior_mean
+```
+
+**Non-array metadata** — strings, ints, config dicts:
+
+```python
+class MyModel(Module):
+    layers: list
+    activation: str = eqx.field(static=True)
+    n_classes: int = eqx.field(static=True)
+```
+
+### Saving and loading models with static fields
+
+`eqx.tree_serialise_leaves` only saves pytree leaves (trainable parameters). Static fields are **not saved**, so on load they come from the skeleton you provide — if the skeleton has wrong static values, the loaded model silently uses them. For models with static fields, write manual save/load functions that capture everything:
+
+```python
+import pickle
+
+def save_model(model, path):
+    """Save all model state: parameters + static fields."""
+    state = {}
+    # Trainable parameters
+    for name, param in model.get_parameters().items():
+        state[name + ".mean"] = np.asarray(param.mean)
+        if hasattr(param, "raw_stdv"):
+            state[name + ".raw_stdv"] = np.asarray(param.raw_stdv)
+        elif hasattr(param, "raw_scale"):
+            state[name + ".raw_scale"] = np.asarray(param.raw_scale)
+    # Static fields — stored directly since they're already hashable
+    state["_prior_data"] = model._prior_data
+    state["_prior_shape"] = model._prior_shape
+    with open(path, "wb") as f:
+        pickle.dump(state, f)
+
+
+def load_model(path, dim, *, key):
+    """Load model: reconstruct with saved static fields, then restore parameters."""
+    with open(path, "rb") as f:
+        state = pickle.load(f)
+    # Reconstruct with correct static fields
+    prior_mean = None
+    if state["_prior_data"] is not None:
+        prior_mean = np.array(state["_prior_data"]).reshape(state["_prior_shape"])
+    model = TransferModel(dim, key=key, prior_mean=prior_mean)
+    # Restore trainable parameters
+    model = eqx.tree_at(lambda m: m.W.mean, model, jnp.array(state["W.mean"]))
+    model = eqx.tree_at(lambda m: m.b.mean, model, jnp.array(state["b.mean"]))
+    if "W.raw_stdv" in state:
+        model = eqx.tree_at(lambda m: m.W.raw_stdv, model, jnp.array(state["W.raw_stdv"]))
+        model = eqx.tree_at(lambda m: m.b.raw_stdv, model, jnp.array(state["b.raw_stdv"]))
+    return model
+```
+
+This approach is more verbose than `eqx.tree_serialise_leaves` and guarantees that everything is saved and restored correctly — no risk of mismatched static values.
+
+**When to use which:**
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| `eqx.tree_serialise_leaves` | Simple, one-liner | Drops static fields; caller must supply correct skeleton |
+| Manual save/load | Saves everything; self-contained | More code to write per model |
+
+For models with no static fields, `eqx.tree_serialise_leaves` is fine. For models with static fields (especially array-valued ones like prior means), prefer manual save/load.
+
 ## Running tests
 
 ```bash
