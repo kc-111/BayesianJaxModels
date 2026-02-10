@@ -56,7 +56,7 @@ def _build_filter(model: Module, predicate) -> Module:
 
 
 def freeze_stdvs(model: Module) -> tuple:
-    """Partition model so that raw_stdv / raw_scale fields are static.
+    """Partition model so that log_sigma / log_scale fields are static.
 
     Args:
         model: The model to partition.
@@ -65,7 +65,7 @@ def freeze_stdvs(model: Module) -> tuple:
         Tuple of ``(dynamic, static)`` for use with ``eqx.combine``.
     """
     filter_spec = _build_filter(
-        model, lambda path: not _path_contains(path, "raw_stdv", "raw_scale")
+        model, lambda path: not _path_contains(path, "log_sigma", "log_scale")
     )
     return eqx.partition(model, filter_spec)
 
@@ -207,8 +207,8 @@ def sample_all_parameters(model: Module, rng: jax.Array) -> Module:
     """Return a copy of model with all means replaced by reparameterized samples.
 
     The sampled values are computed via the reparameterization trick
-    (``mean + stdv * noise``), so gradients flow back through the sample
-    to both ``mean`` and ``raw_stdv`` of the original model. The returned
+    (``mean + exp(log_sigma) * noise``), so gradients flow back through
+    the sample to both ``mean`` and ``log_sigma`` of the original model. The returned
     model can be called with ``sample=False`` (it will use the sampled
     means).
 
@@ -237,7 +237,7 @@ def sample_all_parameters(model: Module, rng: jax.Array) -> Module:
 def _set_mean(param: AbstractParameter, new_mean: jax.Array) -> AbstractParameter:
     """Return a copy of param with its mean replaced.
 
-    Preserves all other fields (raw_stdv, raw_scale) so the pytree
+    Preserves all other fields (log_sigma, log_scale) so the pytree
     structure stays intact and gradients can flow through.
 
     Args:
@@ -307,42 +307,44 @@ def _parse_name(name: str) -> list:
 
 
 def gaussian_entropy(model: Module) -> jax.Array:
-    """Compute sum(log(stdv)) over all Gaussian parameters.
+    """Compute sum(log_sigma) over all Gaussian parameters.
 
     This is the variable part of the Gaussian entropy
     ``H(q) = 0.5 * d * (1 + log(2*pi)) + sum(log(sigma))``.
-    The caller can add the constant if needed.
+    Because sigma = exp(log_sigma), the log cancels the exp and the
+    result is simply the sum of the stored ``log_sigma`` values.
 
     Args:
         model: The model to compute entropy for.
 
     Returns:
-        Scalar sum of log-stdvs across all Gaussian parameters.
+        Scalar sum of log_sigma across all Gaussian parameters.
     """
     params = model.get_parameters()
     total = jnp.array(0.0)
     for p in params.values():
         if isinstance(p, GaussianParameter):
-            total = total + jnp.sum(jnp.log(p.stdv))
+            total = total + jnp.sum(p.log_sigma)
     return total
 
 
 def laplacian_entropy(model: Module) -> jax.Array:
-    """Compute sum(log(scale)) over all Laplacian parameters.
+    """Compute sum(log_scale) over all Laplacian parameters.
 
     This is the variable part of the Laplace entropy
     ``H(q) = d * (1 + log(2)) + sum(log(b))``.
-    The caller can add the constant if needed.
+    Because scale = exp(log_scale), the result is simply the sum of
+    the stored ``log_scale`` values.
 
     Args:
         model: The model to compute entropy for.
 
     Returns:
-        Scalar sum of log-scales across all Laplacian parameters.
+        Scalar sum of log_scale across all Laplacian parameters.
     """
     params = model.get_parameters()
     total = jnp.array(0.0)
     for p in params.values():
         if isinstance(p, LaplacianParameter):
-            total = total + jnp.sum(jnp.log(p.scale))
+            total = total + jnp.sum(p.log_scale)
     return total

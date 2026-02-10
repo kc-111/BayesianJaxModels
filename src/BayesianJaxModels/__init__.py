@@ -6,7 +6,6 @@ sampling, and entropy computation.
 """
 
 from .parameter import (
-    STDV_EPS,
     AbstractParameter,
     DeterministicParameter,
     GaussianParameter,
@@ -31,7 +30,6 @@ from .utils import (
 
 __all__ = [
     # Parameter types
-    "STDV_EPS",
     "AbstractParameter",
     "DeterministicParameter",
     "GaussianParameter",

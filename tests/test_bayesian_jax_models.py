@@ -87,22 +87,22 @@ class TestParameters:
 
     def test_gaussian_sample_shape(self):
         p = GaussianParameter(
-            mean=jnp.zeros((3, 4)), raw_stdv=jnp.ones((3, 4)) * 0.1
+            mean=jnp.zeros((3, 4)), log_sigma=jnp.ones((3, 4)) * (-2.0)
         )
         s = p.sample(random.key(42))
         assert s.shape == (3, 4)
 
     def test_gaussian_stdv_positive(self):
         p = GaussianParameter(
-            mean=jnp.zeros(5), raw_stdv=jnp.array([-1.0, 0.0, 0.5, 1.0, 2.0])
+            mean=jnp.zeros(5), log_sigma=jnp.array([-5.0, -1.0, 0.0, 1.0, 2.0])
         )
         assert jnp.all(p.stdv > 0)
 
     def test_gaussian_sample_distribution(self):
         """Many samples should have mean ~ param.mean and std ~ param.stdv."""
         mean = jnp.array([1.0, -2.0])
-        raw_stdv = jnp.array([0.5, 1.0])
-        p = GaussianParameter(mean=mean, raw_stdv=raw_stdv)
+        log_sigma = jnp.array([-1.0, 0.0])  # stdv = [~0.368, 1.0]
+        p = GaussianParameter(mean=mean, log_sigma=log_sigma)
         keys = random.split(random.key(0), 10000)
         samples = jax.vmap(p.sample)(keys)
         assert jnp.allclose(samples.mean(axis=0), mean, atol=0.05)
@@ -110,27 +110,27 @@ class TestParameters:
 
     def test_laplacian_sample_shape(self):
         p = LaplacianParameter(
-            mean=jnp.zeros(5), raw_scale=jnp.ones(5) * 0.1
+            mean=jnp.zeros(5), log_scale=jnp.ones(5) * (-2.0)
         )
         s = p.sample(random.key(0))
         assert s.shape == (5,)
 
     def test_laplacian_scale_positive(self):
         p = LaplacianParameter(
-            mean=jnp.zeros(3), raw_scale=jnp.array([-1.0, 0.0, 1.0])
+            mean=jnp.zeros(3), log_scale=jnp.array([-5.0, 0.0, 1.0])
         )
         assert jnp.all(p.scale > 0)
 
     def test_laplacian_sample_distribution(self):
         """Laplacian samples should have mean ~ param.mean."""
         mean = jnp.array([3.0])
-        p = LaplacianParameter(mean=mean, raw_scale=jnp.array([0.5]))
+        p = LaplacianParameter(mean=mean, log_scale=jnp.array([-0.5]))
         keys = random.split(random.key(0), 10000)
         samples = jax.vmap(p.sample)(keys)
         assert jnp.allclose(samples.mean(axis=0), mean, atol=0.1)
 
     def test_parameter_shape_property(self):
-        p = GaussianParameter(mean=jnp.zeros((2, 3)), raw_stdv=jnp.ones((2, 3)))
+        p = GaussianParameter(mean=jnp.zeros((2, 3)), log_sigma=jnp.zeros((2, 3)))
         assert p.shape == (2, 3)
 
 
@@ -244,9 +244,9 @@ class TestModuleIntrospection:
         assert jnp.all(stdvs[:12] > 0)
         assert jnp.allclose(stdvs[12:], 0.0)
 
-    def test_flatten_raw_stdvs_shape(self):
+    def test_flatten_log_sigmas_shape(self):
         layer = BayesianLinear(4, 3, key=random.key(0))
-        raw = layer.flatten_raw_stdvs()
+        raw = layer.flatten_log_sigmas()
         assert raw.shape == (15,)
 
     def test_mlp_forward(self):
@@ -285,12 +285,12 @@ class TestFreezeUnfreeze:
         has_nonzero = any(jnp.any(g != 0) for g in flat_grads if g is not None)
         assert has_nonzero
 
-        # Verify static contains raw_stdv (frozen, so not in dynamic)
+        # Verify static contains log_sigma (frozen, so not in dynamic)
         dynamic_flat, _ = jax.tree.flatten_with_path(dynamic)
         for path, val in dynamic_flat:
             path_str = str(path)
-            if "raw_stdv" in path_str:
-                assert val is None, f"raw_stdv should be frozen but found in dynamic: {path_str}"
+            if "log_sigma" in path_str:
+                assert val is None, f"log_sigma should be frozen but found in dynamic: {path_str}"
 
     def test_freeze_means_grad_on_stdvs_only(self):
         """After freezing means, gradients should only flow through stdvs."""
@@ -366,7 +366,7 @@ class TestUtils:
 
     def test_gaussian_entropy_value(self):
         """Check gaussian_entropy matches manual computation."""
-        p = GaussianParameter(mean=jnp.zeros(3), raw_stdv=jnp.array([0.1, 0.5, 1.0]))
+        p = GaussianParameter(mean=jnp.zeros(3), log_sigma=jnp.array([-2.0, -0.5, 0.0]))
 
         class SingleParam(Module):
             w: GaussianParameter
@@ -390,7 +390,7 @@ class TestUtils:
 
     def test_laplacian_entropy_value(self):
         """Check laplacian_entropy matches manual computation."""
-        p = LaplacianParameter(mean=jnp.zeros(4), raw_scale=jnp.array([0.1, 0.3, 0.7, 1.0]))
+        p = LaplacianParameter(mean=jnp.zeros(4), log_scale=jnp.array([-2.0, -1.0, -0.3, 0.0]))
 
         class SingleParam(Module):
             w: LaplacianParameter
@@ -569,9 +569,9 @@ class TestMakeParameter:
         assert isinstance(p, LaplacianParameter)
         assert p.shape == (3, 3)
 
-    def test_init_raw_stdv(self):
-        p = make_parameter(jnp.zeros(2), init_raw_stdv=0.5)
-        assert jnp.allclose(p.raw_stdv, 0.5)
+    def test_init_log_sigma(self):
+        p = make_parameter(jnp.zeros(2), init_log_sigma=-3.0)
+        assert jnp.allclose(p.log_sigma, -3.0)
 
     def test_in_custom_model(self):
         """make_parameter works inside a user-defined Module."""

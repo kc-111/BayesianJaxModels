@@ -93,7 +93,7 @@ class TestVIvsMCMC:
         # Build model: single Bayesian linear layer (no bias for simplicity)
         model = BayesianLinear(
             3, 1, use_bias=False, bayesian=True, param_type=GaussianParameter,
-            init_raw_stdv=0.1, key=random.key(0)
+            init_log_sigma=-3.0, key=random.key(0)
         )
 
         # Stage 1: MAP — freeze stdvs, optimize means
@@ -129,7 +129,7 @@ class TestVIvsMCMC:
 
         model = BayesianLinear(
             3, 1, use_bias=False, bayesian=True, param_type=GaussianParameter,
-            init_raw_stdv=0.1, key=random.key(0)
+            init_log_sigma=-3.0, key=random.key(0)
         )
 
         # Stage 1: MAP

@@ -13,7 +13,7 @@ class Module(eqx.Module):
     """Base class for Bayesian models.
 
     Provides recursive parameter introspection: ``get_parameters``,
-    ``flatten_means``, ``flatten_stdvs``, and ``flatten_raw_stdvs``.
+    ``flatten_means``, ``flatten_stdvs``, and ``flatten_log_sigmas``.
     """
 
     def get_parameters(self) -> dict[str, AbstractParameter]:
@@ -81,10 +81,11 @@ class Module(eqx.Module):
                 parts.append(jnp.zeros(p.mean.size))
         return jnp.concatenate(parts)
 
-    def flatten_raw_stdvs(self) -> jax.Array:
-        """Concatenate all raw (unconstrained) variational params into a flat vector.
+    def flatten_log_sigmas(self) -> jax.Array:
+        """Concatenate all unconstrained log-scale params into a flat vector.
 
-        These are the values the optimiser updates directly.
+        These are the values the optimiser updates directly
+        (``log_sigma`` for Gaussian, ``log_scale`` for Laplacian).
         Deterministic parameters contribute zeros.
 
         Returns:
@@ -95,10 +96,10 @@ class Module(eqx.Module):
             return jnp.array([])
         parts = []
         for p in params.values():
-            if hasattr(p, "raw_stdv"):
-                parts.append(p.raw_stdv.ravel())
-            elif hasattr(p, "raw_scale"):
-                parts.append(p.raw_scale.ravel())
+            if hasattr(p, "log_sigma"):
+                parts.append(p.log_sigma.ravel())
+            elif hasattr(p, "log_scale"):
+                parts.append(p.log_scale.ravel())
             else:
                 parts.append(jnp.zeros(p.mean.size))
         return jnp.concatenate(parts)

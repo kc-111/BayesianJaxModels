@@ -25,8 +25,8 @@ class BayesianLinear(Module):
         bayesian_bias: If True (default), bias also uses a variational
             distribution.
         param_type: ``GaussianParameter`` (default) or ``LaplacianParameter``.
-        init_raw_stdv: Initial value for the raw standard-deviation / scale
-            parameters.
+        init_log_sigma: Initial value for the unconstrained log-scale
+            parameter.  Effective initial stdv is ``exp(init_log_sigma)``.
         key: PRNG key for Xavier initialisation of means.
     """
 
@@ -42,7 +42,7 @@ class BayesianLinear(Module):
         bayesian: bool = True,
         bayesian_bias: bool = True,
         param_type: Type[AbstractParameter] = GaussianParameter,
-        init_raw_stdv: float = 0.01,
+        init_log_sigma: float = -5.0,
         key: jax.Array,
     ):
         k1, k2 = random.split(key)
@@ -51,14 +51,14 @@ class BayesianLinear(Module):
         W_init = random.uniform(k1, (out_features, in_features), minval=-limit, maxval=limit)
         self.W = make_parameter(
             W_init, bayesian=bayesian, param_type=param_type,
-            init_raw_stdv=init_raw_stdv,
+            init_log_sigma=init_log_sigma,
         )
 
         if use_bias:
             b_init = jnp.zeros(out_features)
             self.b = make_parameter(
                 b_init, bayesian=bayesian_bias, param_type=param_type,
-                init_raw_stdv=init_raw_stdv,
+                init_log_sigma=init_log_sigma,
             )
         else:
             self.b = None

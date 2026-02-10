@@ -1,6 +1,7 @@
 """Bayesian parameter classes built on equinox.
 
-Each parameter stores a mean and optionally variational parameters (stdv/scale).
+Each parameter stores a mean and an unconstrained log-scale parameter.
+Positivity of sigma / scale is guaranteed via the exp transform.
 Sampling uses reparameterization tricks for gradient flow.
 """
 
@@ -11,8 +12,6 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax import random
-
-STDV_EPS = 1e-4
 
 
 class AbstractParameter(eqx.Module):
@@ -56,19 +55,20 @@ class DeterministicParameter(AbstractParameter):
 class GaussianParameter(AbstractParameter):
     """Gaussian variational parameter with reparameterization.
 
-    The actual standard deviation is ``raw_stdv**2 + STDV_EPS``, which
-    guarantees positivity without constrained optimisation.
+    The actual standard deviation is ``exp(log_sigma)``, which guarantees
+    positivity via the exponential transform.  The unconstrained
+    ``log_sigma`` is the quantity the optimiser updates directly.
     """
 
-    raw_stdv: jax.Array
+    log_sigma: jax.Array
 
     @property
     def stdv(self) -> jax.Array:
-        """Positive standard deviation derived from ``raw_stdv``."""
-        return self.raw_stdv ** 2 + STDV_EPS
+        """Positive standard deviation: ``exp(log_sigma)``."""
+        return jnp.exp(self.log_sigma)
 
     def sample(self, rng: jax.Array) -> jax.Array:
-        """Sample via ``mean + stdv * N(0, 1)``.
+        """Sample via ``mean + exp(log_sigma) * N(0, 1)``.
 
         Args:
             rng: PRNG key.
@@ -82,15 +82,16 @@ class GaussianParameter(AbstractParameter):
 class LaplacianParameter(AbstractParameter):
     """Laplace variational parameter using inverse-CDF reparameterization.
 
-    The actual scale is ``raw_scale**2 + STDV_EPS``.
+    The actual scale is ``exp(log_scale)``, guaranteed positive via the
+    exponential transform.
     """
 
-    raw_scale: jax.Array
+    log_scale: jax.Array
 
     @property
     def scale(self) -> jax.Array:
-        """Positive scale derived from ``raw_scale``."""
-        return self.raw_scale ** 2 + STDV_EPS
+        """Positive scale: ``exp(log_scale)``."""
+        return jnp.exp(self.log_scale)
 
     def sample(self, rng: jax.Array) -> jax.Array:
         """Sample via the inverse-CDF Laplace reparameterization.
@@ -112,7 +113,7 @@ def make_parameter(
     *,
     bayesian: bool = True,
     param_type: Type[AbstractParameter] = GaussianParameter,
-    init_raw_stdv: float = 0.01,
+    init_log_sigma: float = -5.0,
 ) -> AbstractParameter:
     """Wrap an arbitrary array as a Bayesian or deterministic parameter.
 
@@ -121,8 +122,9 @@ def make_parameter(
         bayesian: If True (default), wrap in ``param_type``. If False, wrap
             in ``DeterministicParameter``.
         param_type: ``GaussianParameter`` (default) or ``LaplacianParameter``.
-        init_raw_stdv: Initial value for the raw standard-deviation / scale
-            field.
+        init_log_sigma: Initial value for the unconstrained log-scale field
+            (``log_sigma`` or ``log_scale``).  The effective initial standard
+            deviation / scale is ``exp(init_log_sigma)``.
 
     Returns:
         An ``AbstractParameter`` instance wrapping ``value``.
@@ -133,11 +135,11 @@ def make_parameter(
     if param_type is GaussianParameter:
         return GaussianParameter(
             mean=value,
-            raw_stdv=jnp.full_like(value, init_raw_stdv),
+            log_sigma=jnp.full_like(value, init_log_sigma),
         )
     if param_type is LaplacianParameter:
         return LaplacianParameter(
             mean=value,
-            raw_scale=jnp.full_like(value, init_raw_stdv),
+            log_scale=jnp.full_like(value, init_log_sigma),
         )
     raise ValueError(f"Unknown param_type: {param_type}")

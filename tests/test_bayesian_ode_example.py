@@ -151,7 +151,7 @@ class TestBayesianODE:
         This is the actual training pipeline: we sample weights via the
         reparameterisation trick, integrate the ODE with those fixed
         weights, compute a loss, and differentiate back to both mean and
-        raw_stdv of the original model.
+        log_sigma of the original model.
         """
         func = BayesianODEFunc(state_dim=2, hidden_dim=8, key=random.key(0))
         y0 = jnp.array([1.0, 0.0])
@@ -177,10 +177,10 @@ class TestBayesianODE:
         assert any(jnp.any(g != 0) for g in mean_grads), \
             "Expected non-zero gradients on means"
 
-        # Grads on raw_stdv should also be non-zero (reparameterisation trick)
+        # Grads on log_sigma should also be non-zero (reparameterisation trick)
         stdv_grads = [
             g for path, g in flat_grads
-            if "raw_stdv" in str(path) and isinstance(g, jax.Array)
+            if "log_sigma" in str(path) and isinstance(g, jax.Array)
         ]
         assert any(jnp.any(g != 0) for g in stdv_grads), \
-            "Expected non-zero gradients on raw_stdv (reparameterisation)"
+            "Expected non-zero gradients on log_sigma (reparameterisation)"
